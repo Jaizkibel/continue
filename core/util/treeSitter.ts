@@ -92,6 +92,7 @@ export const supportedLanguages: { [key: string]: LanguageName } = {
   html: LanguageName.HTML,
   htm: LanguageName.HTML,
   java: LanguageName.JAVA,
+  groovy: LanguageName.JAVA,
   lua: LanguageName.LUA,
   ocaml: LanguageName.OCAML,
   ml: LanguageName.OCAML,

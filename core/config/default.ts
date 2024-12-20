@@ -6,10 +6,10 @@ import {
 } from "../";
 
 export const DEFAULT_CHAT_MODEL_CONFIG: ModelDescription = {
-  model: "claude-3-5-sonnet-latest",
-  provider: "anthropic",
-  apiKey: "",
-  title: "Claude 3.5 Sonnet",
+  "title": "DeepSeek V2.5",
+  "model": "deepseek-chat",
+  "provider": "deepseek",
+  "apiKey": "sk-bbea0c78f71348dd8516d57c1f4906cb"
 };
 
 export const DEFAULT_AUTOCOMPLETE_MODEL_CONFIG: ModelDescription = {
@@ -58,6 +58,7 @@ export const defaultContextProvidersVsCode: ContextProviderWithParams[] = [
   { name: "problems", params: {} },
   { name: "folder", params: {} },
   { name: "codebase", params: {} },
+  { name: "repo-map", params: {} },
 ];
 
 export const defaultContextProvidersJetBrains: ContextProviderWithParams[] = [
