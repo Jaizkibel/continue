@@ -4,6 +4,7 @@ import {
   ContextProviderExtras,
   ContextSubmenuItem,
   LoadSubmenuItemsArgs,
+  TableInfo,
 } from "../../index.js";
 import { BaseContextProvider } from "../index.js";
 
@@ -19,6 +20,49 @@ class PostgresContextProvider extends BaseContextProvider {
   static ALL_TABLES = "__all_tables";
   static DEFAULT_SAMPLE_ROWS = 3;
 
+  // valid table types in PostgreSQL:
+  //    BASE TABLE for a persistent base table (the normal table type),
+  //    VIEW for a view,
+  //    FOREIGN for a foreign table, or
+  //    LOCAL TEMPORARY for a temporary table
+  static tablesQuery = `
+  SELECT table_schema, table_name, 
+         CASE WHEN table_type = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS table_type
+  FROM information_schema.tables
+  WHERE table_name like $1 AND table_schema like $2
+  union all
+  select schemaname, matviewname, 'MATERIALIZED VIEW' from pg_matviews
+  WHERE matviewname like $1 AND schemaname like $2`;
+  static columnQuery = `
+  SELECT
+      a.attname AS column_name,
+      format_type(a.atttypid, a.atttypmod)||case when a.attnotnull then ' not null' else '' end AS data_type
+  FROM pg_attribute a
+  JOIN pg_class c ON a.attrelid = c.oid
+  JOIN pg_namespace n ON c.relnamespace = n.oid
+  WHERE n.nspname = $1 AND c.relname like $2
+  AND a.attnum > 0
+  ORDER BY a.attnum`;
+  static indexQuery = `
+  SELECT indexname, indexdef FROM pg_indexes
+  WHERE schemaname = $1 AND tablename = $2
+  ORDER BY indexname`;
+  static constraintQuery = `
+  SELECT conname AS constraint_name,
+         pg_get_constraintdef(c.oid) AS constraint_definition
+  FROM pg_constraint c
+  JOIN pg_namespace n ON n.oid = c.connamespace
+  WHERE n.nspname = $1 AND conrelid::regclass = $2::regclass
+  ORDER BY conname`;
+  static viewQuery = `
+  SELECT view_definition 
+  FROM information_schema.views 
+  WHERE table_schema = $1 AND table_name = $2`;
+  static materializedViewQuery = `
+  SELECT pg_get_viewdef(matviewname::regclass, true) as view_definition
+  FROM pg_matviews
+  WHERE schemaname = $1 AND matviewname = $2`;
+
   private async getPool() {
     // @ts-ignore
     const pg = await import("pg");
@@ -32,18 +76,27 @@ class PostgresContextProvider extends BaseContextProvider {
     });
   }
 
-  private async getTableNames(pool: any): Promise<string[]> {
+  private async getTableInfos(
+    pool: any,
+    table: string = "%",
+  ): Promise<TableInfo[]> {
     const schema = this.options.schema ?? "public";
-    let tablesInfoQuery = `
-SELECT table_schema, table_name
-FROM information_schema.tables`;
-    if (schema !== null) {
-      tablesInfoQuery += ` WHERE table_schema = '${schema}'`;
-    }
-    const { rows: tablesInfo } = await pool.query(tablesInfoQuery);
-    return tablesInfo.map(
-      (tableInfo: any) => `${tableInfo.table_schema}.${tableInfo.table_name}`,
+    const { rows: tablesInfo } = await pool.query(
+      PostgresContextProvider.tablesQuery,
+      [table, schema],
     );
+    // order tableInfos by table_name
+    tablesInfo.sort((a: any, b: any) =>
+      a.table_name.localeCompare(b.table_name),
+    );
+    return tablesInfo.map((tableInfo: any) => {
+      const tableType = tableInfo.table_type?.toLowerCase() || "undefined";
+      return {
+        schema: tableInfo.table_schema,
+        name: tableInfo.table_name,
+        type: tableType,
+      };
+    });
   }
 
   async getContextItems(
@@ -55,45 +108,84 @@ FROM information_schema.tables`;
     try {
       const contextItems: ContextItem[] = [];
 
-      const tableNames = [];
+      const tableInfos: TableInfo[] = [];
       if (query === PostgresContextProvider.ALL_TABLES) {
-        tableNames.push(...(await this.getTableNames(pool)));
+        tableInfos.push(...(await this.getTableInfos(pool)));
       } else {
-        tableNames.push(query);
-      }
-
-      for (const tableName of tableNames) {
-        // Get the table schema
-        if (!tableName.includes(".")) {
+        if (!query.includes(".")) {
           throw new Error(
-            `Table name must be in format schema.table_name, got ${tableName}`,
+            `Table name must be in format schema.table_name, got ${query}`,
           );
         }
-        const schemaQuery = `
-SELECT column_name, data_type, character_maximum_length
-FROM INFORMATION_SCHEMA.COLUMNS
-WHERE table_schema = '${tableName.split(".")[0]}'
-  AND table_name = '${tableName.split(".")[1]}'`;
-        console.log("schemaQuery", schemaQuery);
-        const { rows: tableSchema } = await pool.query(schemaQuery);
+        const [qSchema, qName] = query.split(".");
+        tableInfos.push(...(await this.getTableInfos(pool, qName)));
+      }
 
-        // Get the sample rows
+      for (const tableInfo of tableInfos) {
+        // console.log("schemaQuery", schemaQuery);
+        const { rows: tableSchema } = await pool.query(
+          PostgresContextProvider.columnQuery,
+          [tableInfo.schema, tableInfo.name],
+        );
+
+        // Get the number of sample rows
         const sampleRows =
           this.options.sampleRows ??
           PostgresContextProvider.DEFAULT_SAMPLE_ROWS;
-        const { rows: sampleRowResults } = await pool.query(`
-SELECT *
-FROM ${tableName}
-LIMIT ${sampleRows}`);
 
-        // Create prompt from the table schema and sample rows
-        let prompt = `Postgres schema for database ${this.options.database} table ${tableName}:\n`;
+        const fullName = `${tableInfo.schema}.${tableInfo.name}`;
+        // Create prompt from the table informations
+        let prompt = `Postgres schema for database ${this.options.database} ${tableInfo.type} ${fullName}:\n`;
         prompt += `${JSON.stringify(tableSchema, null, 2)}\n\n`;
-        prompt += `Sample rows: ${JSON.stringify(sampleRowResults, null, 2)}`;
+
+        // Get sample rows (not for views)
+        if (tableInfo.type !== 'view' && sampleRows > 0) {
+          const samplesQuery = `SELECT * FROM ${tableInfo.schema}.${tableInfo.name} LIMIT $1`;
+          const { rows: sampleRowResults } = await pool.query(samplesQuery, [
+            sampleRows,
+          ]);
+          prompt += `Sample rows: ${JSON.stringify(sampleRowResults, null, 2)}\n\n`;
+        }
+
+        // Get indexes, foreign keys and sample rows for tables only
+        if (tableInfo.type === "table") {
+          // Get indexes
+          // console.log("indexQuery", indexQuery);
+          const { rows: indexDefinitionResults } = await pool.query(
+            PostgresContextProvider.indexQuery,
+            [tableInfo.schema, tableInfo.name],
+          );
+          prompt += `Indexes: ${JSON.stringify(indexDefinitionResults, null, 2)}\n\n`;
+
+          // Get constraints
+          const { rows: constraintDefinitionResults } = await pool.query(
+            PostgresContextProvider.constraintQuery,
+            [tableInfo.schema, fullName],
+          );
+          prompt += `Constraints: ${JSON.stringify(constraintDefinitionResults, null, 2)}`;
+        } else if (tableInfo.type === "view") {
+          // Get view definition statement
+          const { rows: viewDefinitionResults } = await pool.query(
+            PostgresContextProvider.viewQuery,
+            [tableInfo.schema, tableInfo.name],
+          );
+          if (viewDefinitionResults.length > 0) {
+            prompt += `View query: ${JSON.stringify(viewDefinitionResults[0].view_definition, null, 2)}`;
+          }
+        } else if (tableInfo.type === "materialized view") {
+          // Get materilized view definition statement
+          const { rows: matViewDefinitionResults } = await pool.query(
+            PostgresContextProvider.materializedViewQuery,
+            [tableInfo.schema, tableInfo.name],
+          );
+          if (matViewDefinitionResults.length > 0) {
+            prompt += `Materialized view query: ${JSON.stringify(matViewDefinitionResults[0].view_definition, null, 2)}`;
+          }
+        }
 
         contextItems.push({
-          name: `${this.options.database}-${tableName}-schema-and-sample-rows`,
-          description: `Schema and sample rows for table ${tableName}`,
+          name: `${this.options.database}-${tableInfo.schema}-${tableInfo.name}-schema`,
+          description: `Schema and sample rows for ${tableInfo.type} ${fullName}`,
           content: prompt,
         });
       }
@@ -112,26 +204,29 @@ LIMIT ${sampleRows}`);
 
     try {
       const contextItems: ContextSubmenuItem[] = [];
-      const tableNames = await this.getTableNames(pool);
+      const tableInfos = await this.getTableInfos(pool);
 
-      for (const tableName of tableNames) {
-        contextItems.push({
-          id: tableName,
-          title: tableName,
-          description: `Schema from ${tableName} and ${this.options.sampleRows} sample rows.`,
-        });
-      }
+      // item "All tables" should be first in list
       contextItems.push({
         id: PostgresContextProvider.ALL_TABLES,
         title: "All tables",
         description: `Schema from all tables and ${this.options.sampleRows} sample rows each.`,
       });
+      for (const tableInfo of tableInfos) {
+        const fullName = `${tableInfo.schema}.${tableInfo.name}`;
+        contextItems.push({
+          id: fullName,
+          title: fullName,
+          description: `Schema from ${fullName} and ${this.options.sampleRows} sample rows.`,
+        });
+      }
 
       return contextItems;
     } catch (error) {
       throw new Error(`Failed to query PostgreSQL database: ${error}`);
     }
   }
+
 }
 
 export default PostgresContextProvider;
