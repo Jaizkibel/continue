@@ -2358,6 +2358,12 @@
                     "description": "Number of rows to sample from the database",
                     "default": 3,
                     "type": "integer"
+                  },
+                  "excludePattern": {
+                    "title": "Exclude tables",
+                    "description": "Regex to exclude tables/views (case insensitive)",
+                    "default": "",
+                    "type": "string"
                   }
                 }
               }

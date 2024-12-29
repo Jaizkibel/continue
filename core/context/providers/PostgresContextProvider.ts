@@ -1,3 +1,4 @@
+import { config } from "dotenv";
 import {
   ContextItem,
   ContextProviderDescription,
@@ -27,12 +28,12 @@ class PostgresContextProvider extends BaseContextProvider {
   //    LOCAL TEMPORARY for a temporary table
   static tablesQuery = `
   SELECT table_schema, table_name, 
-         CASE WHEN table_type = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS table_type
+        CASE WHEN table_type = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS table_type
   FROM information_schema.tables
-  WHERE table_name like $1 AND table_schema like $2
+  WHERE table_name like $1 AND table_schema like $2 AND ($3 = '' OR table_name !~* $3)
   union all
   select schemaname, matviewname, 'MATERIALIZED VIEW' from pg_matviews
-  WHERE matviewname like $1 AND schemaname like $2`;
+  WHERE matviewname like $1 AND schemaname like $2 AND ($3 = '' OR matviewname !~* $3)`;
   static columnQuery = `
   SELECT
       a.attname AS column_name,
@@ -81,9 +82,10 @@ class PostgresContextProvider extends BaseContextProvider {
     table: string = "%",
   ): Promise<TableInfo[]> {
     const schema = this.options.schema ?? "public";
+    const excludePattern = this.options.excludePattern ?? "";
     const { rows: tablesInfo } = await pool.query(
       PostgresContextProvider.tablesQuery,
-      [table, schema],
+      [table, schema, excludePattern],
     );
     // order tableInfos by table_name
     tablesInfo.sort((a: any, b: any) =>
@@ -139,7 +141,7 @@ class PostgresContextProvider extends BaseContextProvider {
         prompt += `${JSON.stringify(tableSchema, null, 2)}\n\n`;
 
         // Get sample rows (not for views)
-        if (tableInfo.type !== 'view' && sampleRows > 0) {
+        if (tableInfo.type !== "view" && sampleRows > 0) {
           const samplesQuery = `SELECT * FROM ${tableInfo.schema}.${tableInfo.name} LIMIT $1`;
           const { rows: sampleRowResults } = await pool.query(samplesQuery, [
             sampleRows,
@@ -226,7 +228,6 @@ class PostgresContextProvider extends BaseContextProvider {
       throw new Error(`Failed to query PostgreSQL database: ${error}`);
     }
   }
-
 }
 
 export default PostgresContextProvider;
