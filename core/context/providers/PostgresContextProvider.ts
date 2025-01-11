@@ -21,18 +21,18 @@ class PostgresContextProvider extends BaseContextProvider {
   static ALL_TABLES = "__all_tables";
   static DEFAULT_SAMPLE_ROWS = 3;
 
-  // valid table types in PostgreSQL:
+  // table types in information_schema.tables:
   //    BASE TABLE for a persistent base table (the normal table type),
   //    VIEW for a view,
   //    FOREIGN for a foreign table, or
   //    LOCAL TEMPORARY for a temporary table
   static tablesQuery = `
   SELECT table_schema, table_name, 
-        CASE WHEN table_type = 'VIEW' THEN 'VIEW' ELSE 'TABLE' END AS table_type
+        CASE WHEN table_type = 'VIEW' THEN 'view' ELSE 'table' END AS table_type
   FROM information_schema.tables
   WHERE table_name like $1 AND table_schema like $2 AND ($3 = '' OR table_name !~* $3)
   union all
-  select schemaname, matviewname, 'MATERIALIZED VIEW' from pg_matviews
+  select schemaname, matviewname, 'materialized view' from pg_matviews
   WHERE matviewname like $1 AND schemaname like $2 AND ($3 = '' OR matviewname !~* $3)`;
   static columnQuery = `
   SELECT
@@ -45,7 +45,7 @@ class PostgresContextProvider extends BaseContextProvider {
   AND a.attnum > 0
   ORDER BY a.attnum`;
   static indexQuery = `
-  SELECT indexname, indexdef FROM pg_indexes
+  SELECT indexname AS index_name, indexdef as index_definition FROM pg_indexes
   WHERE schemaname = $1 AND tablename = $2
   ORDER BY indexname`;
   static constraintQuery = `
@@ -92,7 +92,7 @@ class PostgresContextProvider extends BaseContextProvider {
       a.table_name.localeCompare(b.table_name),
     );
     return tablesInfo.map((tableInfo: any) => {
-      const tableType = tableInfo.table_type?.toLowerCase() || "undefined";
+      const tableType = tableInfo.table_type || "undefined";
       return {
         schema: tableInfo.table_schema,
         name: tableInfo.table_name,
@@ -114,13 +114,13 @@ class PostgresContextProvider extends BaseContextProvider {
       if (query === PostgresContextProvider.ALL_TABLES) {
         tableInfos.push(...(await this.getTableInfos(pool)));
       } else {
-        if (!query.includes(".")) {
+        if (!query.includes(" ")) {
           throw new Error(
-            `Table name must be in format schema.table_name, got ${query}`,
+            `Table name must be in format "table_name table_type", got ${query}`,
           );
         }
-        const [qSchema, qName] = query.split(".");
-        tableInfos.push(...(await this.getTableInfos(pool, qName)));
+        const [tName, tType] = query.split(" ");
+        tableInfos.push(...(await this.getTableInfos(pool, tName)));
       }
 
       for (const tableInfo of tableInfos) {
@@ -136,7 +136,7 @@ class PostgresContextProvider extends BaseContextProvider {
           PostgresContextProvider.DEFAULT_SAMPLE_ROWS;
 
         const fullName = `${tableInfo.schema}.${tableInfo.name}`;
-        // Create prompt from the table informations
+        // Create prompt from the table information
         let prompt = `Postgres schema for database ${this.options.database} ${tableInfo.type} ${fullName}:\n`;
         prompt += `${JSON.stringify(tableSchema, null, 2)}\n\n`;
 
@@ -175,7 +175,7 @@ class PostgresContextProvider extends BaseContextProvider {
             prompt += `View query: ${JSON.stringify(viewDefinitionResults[0].view_definition, null, 2)}`;
           }
         } else if (tableInfo.type === "materialized view") {
-          // Get materilized view definition statement
+          // Get materialized view definition statement
           const { rows: matViewDefinitionResults } = await pool.query(
             PostgresContextProvider.materializedViewQuery,
             [tableInfo.schema, tableInfo.name],
@@ -212,14 +212,15 @@ class PostgresContextProvider extends BaseContextProvider {
       contextItems.push({
         id: PostgresContextProvider.ALL_TABLES,
         title: "All tables",
-        description: `Schema from all tables and ${this.options.sampleRows} sample rows each.`,
+        description: `All tables/views from schema ${this.options.schema ?? 'public'}`,
       });
       for (const tableInfo of tableInfos) {
-        const fullName = `${tableInfo.schema}.${tableInfo.name}`;
+        const shortType = tableInfo.type.startsWith('mat') ? 'matview' : tableInfo.type;
+        const fullName = `${tableInfo.name} ${shortType}`;
         contextItems.push({
           id: fullName,
           title: fullName,
-          description: `Schema from ${fullName} and ${this.options.sampleRows} sample rows.`,
+          description: '',
         });
       }
 
